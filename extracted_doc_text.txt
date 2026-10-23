@@ -1,0 +1,63 @@
+
+
+TurnoFácil: sistema web para la gestión de turnos de atención al cliente en restaurantes y barberías reconocidas de Mocoa, Putumayo
+Helen Solarte – Enid – Marbell Urrutia – Estefania Perenguez
+Programa en Desarrollo de Software, Institución Universitaria del Putumayo
+Proyecto de Software 1
+Luis Jurado
+15 de agosto de 2026
+
+
+Taller 1: Viabilidad del Proyecto — TurnoFácil
+Introducción
+En restaurantes y barberías reconocidas de Mocoa, Putumayo, la asignación de turnos suele hacerse de forma manual: filas presenciales, cuadernos o mensajes de texto. Esto genera desorganización y tiempos de espera prolongados, y el cliente no sabe con claridad cuánto falta para ser atendido.
+Frente a esto, proponemos TurnoFácil, una plataforma web orientada a apoyar la organización de este proceso. El cliente podrá solicitar su turno y consultar su estado; el empleado podrá atender la cola y actualizar su estado; y el administrador supervisará el proceso general, sin que el sistema elimine por completo las dificultades propias de la atención al público.
+Análisis de Viabilidad
+Viabilidad técnica
+El proyecto requiere construir una aplicación web capaz de gestionar en tiempo real una cola de turnos, con distintos roles de usuario, autenticación y persistencia de la información. Se trata de un sistema ampliamente documentado, que no exige tecnología especializada, sino conocimientos de programación web y de bases de datos relacionales.
+Contamos con bases sólidas en programación, modelado de requerimientos y diseño de bases de datos, adquiridas a lo largo del programa. Aun así, tendremos que reforzar el manejo de sesiones y autenticación, la conexión entre el servidor y la base de datos, y el diseño de interfaces dinámicas.
+Contamos, además, con equipos de cómputo propios y herramientas de desarrollo gratuitas, suficientes para construir y probar el sistema en el tiempo disponible. Por ello, consideramos el proyecto técnicamente viable: contamos con las bases necesarias y lo que falta por reforzar es de curva de aprendizaje moderada y bien documentado.
+Viabilidad operativa
+En restaurantes y barberías reconocidas es común que la atención se organice por orden de llegada sin apoyo digital, dependiendo de cuadernos, papeles o mensajes por redes sociales. Esto genera filas físicas, pérdida de tiempo y errores en el orden de atención, y afecta tanto a los clientes como al personal, que debe responder preguntas repetitivas sobre la fila.
+TurnoFácil busca aportar a este problema centralizando el proceso en un sistema web: el cliente crea una cuenta, elige un servicio y solicita su turno; el sistema le asigna un número y le permite consultar su estado y la cantidad de personas que tiene delante; el empleado ve la cola y actualiza el estado del turno; y el administrador supervisa todo el proceso. El sistema no elimina factores externos, como la duración real de cada servicio, pero sí ordena y hace más predecible la espera.
+Por su facilidad de uso y por responder a un problema real y observable en este tipo de negocios, consideramos el proyecto operativamente viable y de fácil adopción en establecimientos de este perfil.
+Definición del Alcance
+Objetivo general
+Desarrollar un sistema web que contribuya a organizar los turnos de atención al cliente en restaurantes y barberías reconocidas de Mocoa, Putumayo.
+Objetivos específicos
+Analizar los requerimientos del sistema a partir de la problemática de gestión de turnos identificada en el sector de restaurantes y barberías reconocidas.
+Diseñar la arquitectura general del sistema y el modelo de base de datos que soportará la información de usuarios, servicios y turnos.
+Diseñar la interfaz de usuario para los distintos roles del sistema: cliente, empleado y administrador.
+Desarrollar las funcionalidades correspondientes a cada rol identificado en el sistema.
+Implementar los mecanismos de autenticación y control de acceso según el rol de cada usuario.
+Documentar el funcionamiento del sistema para facilitar su uso, mantenimiento y futuras mejoras.
+Realizar pruebas funcionales que validen el correcto desempeño del sistema desarrollado.
+Límites del proyecto
+La primera versión incluirá el registro e inicio de sesión por roles, la solicitud, consulta y seguimiento de turnos por el cliente, la atención de la cola por el empleado, y la gestión de servicios y supervisión general por el administrador.
+No incluirá la selección de un empleado específico por parte del cliente, pues la atención se organiza según el orden de la cola. Tampoco contemplará notificaciones push, pagos en línea, aplicación móvil nativa, ni integración con sistemas externos. El proyecto está dirigido a restaurantes y barberías reconocidas de Mocoa, Putumayo, y no contempla microempresas ni negocios de baja afluencia.
+Identificación de la Población Objetivo
+Perfil del usuario
+La población objetivo está conformada por el personal administrativo y de atención (meseros, barberos) de restaurantes y barberías reconocidas de Mocoa, Putumayo, así como por los clientes que solicitan sus servicios. No se incluyen microempresas ni negocios informales de baja afluencia. Son personas con manejo básico de internet y acceso a un dispositivo con navegador web, sin que se requieran conocimientos técnicos avanzados.
+Roles de usuario
+Cliente. Se registra, inicia sesión, elige un servicio, solicita su turno y consulta su estado y posición en la fila.
+Empleado (mesero o barbero). Inicia sesión, visualiza la cola de turnos, atiende al siguiente cliente y actualiza el estado del turno.
+Administrador. Gestiona los servicios y usuarios, supervisa el estado de los turnos y consulta el historial de atención.
+Requerimientos Funcionales
+El sistema deberá generar un código QR descargable que permita a los clientes acceder directamente al formulario de registro de turno.
+El sistema deberá permitir al cliente seleccionar un servicio, fecha y hora disponible desde la web para solicitar su turno.
+El sistema deberá mostrar al administrador un calendario centralizado con los turnos agendados por día y por semana.
+El sistema deberá permitir al administrador configurar la duración de cada servicio, los horarios de atención y los días laborales.
+El sistema deberá mostrar a los clientes únicamente los intervalos de tiempo disponibles, evitando agendar turnos fuera de los horarios y días laborales configurados por el administrador.
+El sistema deberá permitir el registro e inicio de sesión diferenciado para los roles de cliente, empleado y administrador.
+El sistema deberá permitir al empleado visualizar la cola de turnos y actualizar el estado de cada turno atendido.
+El sistema deberá permitir al administrador consultar el historial de atención de los turnos gestionados.
+Requerimientos No Funcionales
+El sistema deberá dirigir al cliente desde el código QR hasta el formulario de registro de forma inmediata y sin pasos adicionales, garantizando una experiencia de uso sencilla. (Usabilidad)
+El sistema deberá estar disponible las 24 horas del día, de modo que el cliente pueda solicitar su turno en cualquier momento sin depender del horario de atención del negocio. (Disponibilidad)
+El sistema deberá responder a las solicitudes de selección de servicio, fecha y hora en un tiempo breve, para que el proceso de agendamiento resulte ágil para el cliente. (Rendimiento)
+El sistema deberá mantener el calendario de turnos consistente y actualizado en todo momento, evitando duplicidades que afecten la organización del trabajo del administrador. (Confiabilidad)
+El sistema deberá permitir que únicamente el administrador autorizado modifique la configuración de servicios, horarios y días laborales del negocio. (Seguridad)
+El sistema deberá proteger los datos personales de los clientes y restringir su acceso únicamente al personal autorizado del negocio. (Seguridad/Privacidad)
+
+
+

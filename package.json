@@ -1,0 +1,21 @@
+{
+  "name": "turno-facil",
+  "version": "1.0.0",
+  "description": "Sistema web para la gestión de turnos de atención al cliente en restaurantes y barberías de Mocoa, Putumayo",
+  "main": "backend/server.js",
+  "type": "module",
+  "scripts": {
+    "start": "node backend/server.js",
+    "server": "node backend/server.js",
+    "client": "npm --prefix frontend run dev",
+    "build": "npm --prefix frontend run build"
+  },
+  "keywords": ["turnos", "mocoa", "putumayo", "restaurantes", "barberias"],
+  "author": "Helen Solarte, Enid, Marbell Urrutia, Estefania Perenguez - ITP",
+  "license": "ISC",
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.3.0",
+    "qrcode": "^1.5.4"
+  }
+}
