@@ -57,8 +57,26 @@ Acceso exclusivo para el propietario del desarrollo con el usuario `superadmin@t
 
 ---
 
-## 🚀 Cómo Ejecutar la Aplicación
+## Ejecutar localmente
 
-La aplicación está corriendo en segundo plano y lista para abrir en el navegador:
+Se requiere Node.js 22.5 o superior. Desde la raíz del proyecto:
 
-👉 **[http://localhost:3001](http://localhost:3001)**
+```bash
+npm install
+npm --prefix frontend install
+npm run build
+npm start
+```
+
+Abre `http://localhost:3001`. El servidor Node sirve tanto la aplicación como la API; ejecutar únicamente Vite o publicar la carpeta `frontend/dist` como sitio estático no habilita las rutas `/api`.
+
+## Desplegar en Render
+
+El archivo `render.yaml` configura el frontend y el backend como un solo servicio web, con un disco persistente para la base SQLite. Para desplegar:
+
+1. Sube el proyecto a GitHub, incluyendo `render.yaml` y los archivos `package-lock.json`; excluye `*.docx` si no quieres publicar documentos.
+2. En Render, crea un **Blueprint** y conecta el repositorio.
+3. Confirma la creación del servicio y del disco persistente. El servicio usa el plan Starter porque SQLite necesita almacenamiento persistente.
+4. Al terminar el despliegue, abre la URL asignada por Render. Las solicitudes `/api` se atienden en ese mismo dominio.
+
+No publiques solo el frontend en Vercel: sin un backend desplegado, las rutas `/api/marketplace`, `/api/businesses`, `/api/events` y `/api/auth/login` devuelven 404.

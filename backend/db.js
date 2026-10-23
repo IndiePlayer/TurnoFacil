@@ -5,8 +5,9 @@ import fs from 'node:fs';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const dbPath = path.join(__dirname, 'turnofacil.db');
+const dbPath = process.env.DATABASE_PATH || path.join(__dirname, 'turnofacil.db');
 
+fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 export const db = new DatabaseSync(dbPath);
 
 // Enable WAL mode and foreign keys for high performance and integrity
