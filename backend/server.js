@@ -574,8 +574,8 @@ app.post('/api/tickets', async (req, res) => {
     const countToday = (await db.prepare('SELECT COUNT(*) as count FROM tickets WHERE business_id = ? AND date = ?').get(business_id, date)).count;
     const seq = countToday + 1;
     const prefix = business.type === 'barberia' ? 'TF-B' : 'TF-R';
-    const ticketCode = process.env.SUPABASE_DB_URL
-      ? `${prefix}-${randomUUID().replaceAll('-', '').slice(0, 16).toUpperCase()}`
+    const ticketCode = process.env.VERCEL || process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.SUPABASE_DB_URL
+      ? `${prefix}-${randomUUID().replaceAll('-', '').slice(0, 24).toUpperCase()}`
       : `${prefix}${seq.toString().padStart(2, '0')}`;
     const ticketId = randomUUID();
     const user_id = req.user?.role === 'cliente' ? req.user.sub : null;

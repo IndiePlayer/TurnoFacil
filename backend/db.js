@@ -9,9 +9,13 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const dbPath = process.env.DATABASE_PATH || path.join(__dirname, 'turnofacil.db');
 
-const usePostgres = Boolean(process.env.SUPABASE_DB_URL);
+const connectionString = process.env.DATABASE_URL
+  || process.env.POSTGRES_URL
+  || process.env.SUPABASE_DB_URL
+  || process.env.POSTGRES_URL_NON_POOLING;
+const usePostgres = Boolean(connectionString);
 if (process.env.VERCEL && !usePostgres) {
-  throw new Error('SUPABASE_DB_URL must be configured before deploying the API to Vercel.');
+  throw new Error('Connect the Vercel Postgres database to this project so DATABASE_URL is available.');
 }
 let sqlite;
 let pool;
@@ -21,7 +25,7 @@ if (usePostgres) {
   types.setTypeParser(20, Number);
   types.setTypeParser(1700, Number);
   pool = new Pool({
-    connectionString: process.env.SUPABASE_DB_URL,
+    connectionString,
     ssl: { rejectUnauthorized: false },
     max: 1
   });

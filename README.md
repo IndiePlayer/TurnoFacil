@@ -72,16 +72,16 @@ npm start
 
 Abre `http://localhost:3001`. El servidor Node sirve tanto la aplicación como la API; ejecutar únicamente Vite o publicar la carpeta `frontend/dist` como sitio estático no habilita las rutas `/api`.
 
-## Despliegue en Vercel con Supabase
+## Despliegue en Vercel con la base de datos creada en Vercel
 
-El frontend y la API se despliegan juntos en Vercel; PostgreSQL de Supabase almacena los datos. Para usar la integración:
+La base de datos que se crea desde Vercel Marketplace es PostgreSQL gestionado por un proveedor (comúnmente Neon), no un archivo SQLite dentro del proyecto. Conecta esa base de datos al proyecto de Vercel para que inyecte `DATABASE_URL`.
 
-1. Crea un proyecto en Supabase y elige el plan gratuito. Anota la contraseña de base de datos; no la compartas ni la subas a GitHub.
-2. En **Project Settings → Database**, copia el URI del **Session pooler**. El formato esperado está en `.env.example`.
-3. En Vercel, configura **Root Directory** como `.` (la raíz del repositorio, no `frontend`) para que se detecte la función de `api/`.
-4. Agrega `SUPABASE_DB_URL`, `JWT_SECRET` e `INITIAL_SUPERADMIN_PASSWORD` en las variables de entorno de Vercel. Puedes definir también `INITIAL_SUPERADMIN_EMAIL`. Genera secretos propios; no reutilices los ejemplos de `.env.example`.
-5. Vuelve a desplegar. En el primer arranque, la API crea las tablas, datos de catálogo y el superadministrador con la contraseña que configuraste. Las cuentas de demostración y los turnos de ejemplo solo se crean en local. El frontend usa `/api` en el mismo dominio de Vercel.
+1. En **Vercel → Storage → turno-facil-db → Connect Project**, conecta el proyecto correcto y habilita el entorno **Production** (y Preview si lo necesitas).
+2. En la configuración del proyecto, cambia **Root Directory** a `.` (raíz del repositorio), para que Vercel detecte `api/`.
+3. Agrega `JWT_SECRET` e `INITIAL_SUPERADMIN_PASSWORD` como variables **Secret** para Production. Configura también `INITIAL_SUPERADMIN_EMAIL` si quieres usar otro correo. Genera valores propios y no reutilices ejemplos.
+4. Confirma que la integración haya agregado `DATABASE_URL` a Production y vuelve a desplegar.
+5. Al primer arranque, la API crea las tablas, datos de catálogo y el superadministrador con las credenciales iniciales que configuraste. Las cuentas demo y turnos de ejemplo solo se crean localmente.
 
-No uses la contraseña de Supabase en código, variables `VITE_*`, capturas o repositorios. Administradores y empleados necesitan sesión y solo pueden operar sobre su negocio; las operaciones globales requieren una cuenta superadmin. El registro público crea únicamente cuentas de cliente.
+No copies la URI de conexión ni contraseñas en el código, variables `VITE_*`, capturas o repositorios. Si `/api/events` devuelve 500, verifica en **Settings → Environment Variables** que Production tenga `DATABASE_URL` y `JWT_SECRET`; comprueba los nombres, nunca compartas sus valores.
 
-El nivel gratuito tiene límites y puede pausar proyectos inactivos; consulta las cuotas vigentes en [precios de Supabase](https://supabase.com/pricing). Mantén copias de seguridad de cualquier dato que no quieras perder.
+Las cuentas administrativas requieren sesión y permisos asociados a su negocio; las operaciones globales requieren superadministrador. El registro público crea únicamente cuentas de cliente. Revisa los límites y las condiciones del proveedor de base de datos seleccionado en Vercel.
