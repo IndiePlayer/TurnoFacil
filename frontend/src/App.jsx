@@ -47,27 +47,36 @@ export default function App() {
     fetchBusinesses();
   }, []);
 
-  // Listen to Server-Sent Events (SSE) for real-time updates across the app
+  // Poll persisted events so updates work across serverless instances.
   useEffect(() => {
-    const eventSource = new EventSource('/api/events');
-
-    eventSource.addEventListener('ticket_status_changed', (e) => {
+    let cursor = null;
+    const pollEvents = async () => {
       try {
-        const payload = JSON.parse(e.data);
-        if (payload.new_status === 'atendiendo' && payload.ticket) {
-          playQueueChime();
+        const url = cursor === null ? '/api/events' : `/api/events?since=${cursor}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`Events request failed with ${res.status}`);
+        const { events, cursor: nextCursor } = await res.json();
+        cursor = nextCursor;
+
+        for (const event of events) {
+          const payload = JSON.parse(event.payload);
+          if (event.type === 'ticket_status_changed' && payload.new_status === 'atendiendo' && payload.ticket) {
+            playQueueChime();
+          }
+          if (event.type === 'settings_updated') {
+            fetchBusinesses();
+          }
         }
       } catch (err) {
-        console.error('Error parsing SSE event:', err);
+        console.error('Error fetching application events:', err);
       }
-    });
+    };
 
-    eventSource.addEventListener('settings_updated', () => {
-      fetchBusinesses();
-    });
+    pollEvents();
+    const intervalId = setInterval(pollEvents, 5000);
 
     return () => {
-      eventSource.close();
+      clearInterval(intervalId);
     };
   }, []);
 
@@ -105,6 +114,9 @@ export default function App() {
   };
 
   const handleLogout = () => {
+    fetch('/api/auth/logout', { method: 'POST' }).catch((err) => {
+      console.error('Error closing session:', err);
+    });
     setUser(null);
     localStorage.removeItem('turnofacil_user');
     setActiveRole('marketplace');

@@ -55,6 +55,8 @@ Acceso exclusivo para el propietario del desarrollo con el usuario `superadmin@t
 | **✂️ Empleado Barbero** | `barbero@turnofacil.com` | `empleado123` | Mateo Gómez (Don Mocoa) |
 | **🙋‍♀️ Cliente** | `helen@gmail.com` | `cliente123` | Helen Solarte |
 
+Estas credenciales son únicamente para desarrollo local. En producción, el superadministrador se crea con las variables privadas configuradas en Vercel y las cuentas de demostración no se cargan.
+
 ---
 
 ## Ejecutar localmente
@@ -70,13 +72,16 @@ npm start
 
 Abre `http://localhost:3001`. El servidor Node sirve tanto la aplicación como la API; ejecutar únicamente Vite o publicar la carpeta `frontend/dist` como sitio estático no habilita las rutas `/api`.
 
-## Desplegar en Render
+## Despliegue en Vercel con Supabase
 
-El archivo `render.yaml` configura el frontend y el backend como un solo servicio web, con un disco persistente para la base SQLite. Para desplegar:
+El frontend y la API se despliegan juntos en Vercel; PostgreSQL de Supabase almacena los datos. Para usar la integración:
 
-1. Sube el proyecto a GitHub, incluyendo `render.yaml` y los archivos `package-lock.json`; excluye `*.docx` si no quieres publicar documentos.
-2. En Render, crea un **Blueprint** y conecta el repositorio.
-3. Confirma la creación del servicio y del disco persistente. El servicio usa el plan Starter porque SQLite necesita almacenamiento persistente.
-4. Al terminar el despliegue, abre la URL asignada por Render. Las solicitudes `/api` se atienden en ese mismo dominio.
+1. Crea un proyecto en Supabase y elige el plan gratuito. Anota la contraseña de base de datos; no la compartas ni la subas a GitHub.
+2. En **Project Settings → Database**, copia el URI del **Session pooler**. El formato esperado está en `.env.example`.
+3. En Vercel, configura **Root Directory** como `.` (la raíz del repositorio, no `frontend`) para que se detecte la función de `api/`.
+4. Agrega `SUPABASE_DB_URL`, `JWT_SECRET` e `INITIAL_SUPERADMIN_PASSWORD` en las variables de entorno de Vercel. Puedes definir también `INITIAL_SUPERADMIN_EMAIL`. Genera secretos propios; no reutilices los ejemplos de `.env.example`.
+5. Vuelve a desplegar. En el primer arranque, la API crea las tablas, datos de catálogo y el superadministrador con la contraseña que configuraste. Las cuentas de demostración y los turnos de ejemplo solo se crean en local. El frontend usa `/api` en el mismo dominio de Vercel.
 
-No publiques solo el frontend en Vercel: sin un backend desplegado, las rutas `/api/marketplace`, `/api/businesses`, `/api/events` y `/api/auth/login` devuelven 404.
+No uses la contraseña de Supabase en código, variables `VITE_*`, capturas o repositorios. Administradores y empleados necesitan sesión y solo pueden operar sobre su negocio; las operaciones globales requieren una cuenta superadmin. El registro público crea únicamente cuentas de cliente.
+
+El nivel gratuito tiene límites y puede pausar proyectos inactivos; consulta las cuotas vigentes en [precios de Supabase](https://supabase.com/pricing). Mantén copias de seguridad de cualquier dato que no quieras perder.

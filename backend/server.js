@@ -1,70 +1,139 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express from 'express';
-import cors from 'cors';
 import QRCode from 'qrcode';
+import { randomUUID } from 'node:crypto';
 import { db, initDatabase } from './db.js';
+import { createSessionToken, hashPassword, requireRoles, verifyPassword, verifySessionToken } from './auth.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const distPath = path.join(__dirname, '../frontend/dist');
 
-// Initialize SQLite database
-initDatabase();
+// Initialize the database before accepting requests.
+await initDatabase();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-app.use(cors());
 app.use(express.json());
 
-// Server-Sent Events (SSE) clients for real-time updates
-const sseClients = new Set();
+app.use((req, res, next) => {
+  const bearer = req.headers.authorization?.match(/^Bearer (.+)$/i)?.[1];
+  const cookieToken = req.headers.cookie
+    ?.split(';')
+    .map(cookie => cookie.trim())
+    .find(cookie => cookie.startsWith('turnofacil_session='))
+    ?.slice('turnofacil_session='.length);
+  req.user = verifySessionToken(bearer || cookieToken || '');
+  next();
+});
 
-function broadcastEvent(type, data) {
-  const message = `event: ${type}\ndata: ${JSON.stringify(data)}\n\n`;
-  for (const client of sseClients) {
-    try {
-      client.write(message);
-    } catch {
-      sseClients.delete(client);
-    }
+function requireBusinessAccess(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Debes iniciar sesión' });
+  if (req.user.role === 'superadmin') return next();
+  if (['admin', 'empleado'].includes(req.user.role) && req.user.business_id === req.params.id) return next();
+  return res.status(403).json({ error: 'No tienes permiso para este establecimiento' });
+}
+
+function requireBusinessAdmin(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Debes iniciar sesión' });
+  if (req.user.role === 'superadmin') return next();
+  if (req.user.role === 'admin' && req.user.business_id === req.params.id) return next();
+  return res.status(403).json({ error: 'Se requiere ser administrador del establecimiento' });
+}
+
+async function requireTicketBusinessAccess(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Debes iniciar sesión' });
+  if (req.user.role === 'superadmin') return next();
+  try {
+    const ticket = await db.prepare('SELECT business_id FROM tickets WHERE id = ?').get(req.params.id);
+    if (!ticket) return res.status(404).json({ error: 'Turno no encontrado' });
+    if (['admin', 'empleado'].includes(req.user.role) && req.user.business_id === ticket.business_id) return next();
+    return res.status(403).json({ error: 'No tienes permiso para este turno' });
+  } catch (err) {
+    return next(err);
   }
 }
 
-// SSE endpoint
-app.get('/api/events', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache');
-  res.setHeader('Connection', 'keep-alive');
-  res.flushHeaders();
+async function requireServiceBusinessAdmin(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Debes iniciar sesión' });
+  if (req.user.role === 'superadmin') return next();
+  try {
+    const service = await db.prepare('SELECT business_id FROM services WHERE id = ?').get(req.params.id);
+    if (!service) return res.status(404).json({ error: 'Servicio no encontrado' });
+    if (req.user.role === 'admin' && req.user.business_id === service.business_id) return next();
+    return res.status(403).json({ error: 'No tienes permiso para este servicio' });
+  } catch (err) {
+    return next(err);
+  }
+}
 
-  sseClients.add(res);
-  res.write(`event: connected\ndata: ${JSON.stringify({ status: 'ok' })}\n\n`);
+async function requireInventoryBusinessAccess(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: 'Debes iniciar sesión' });
+  if (req.user.role === 'superadmin') return next();
+  try {
+    const item = await db.prepare('SELECT business_id FROM inventory WHERE id = ?').get(req.params.id);
+    if (!item) return res.status(404).json({ error: 'Artículo no encontrado' });
+    if (['admin', 'empleado'].includes(req.user.role) && req.user.business_id === item.business_id) return next();
+    return res.status(403).json({ error: 'No tienes permiso para este artículo' });
+  } catch (err) {
+    return next(err);
+  }
+}
 
-  req.on('close', () => {
-    sseClients.delete(res);
-  });
+function setSessionCookie(res, user) {
+  const secure = process.env.VERCEL ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `turnofacil_session=${createSessionToken(user)}; HttpOnly; SameSite=Strict; Path=/; Max-Age=604800${secure}`);
+}
+
+async function broadcastEvent(type, data) {
+  const safeData = type === 'ticket_status_changed'
+    ? { business_id: data.business_id, new_status: data.new_status, ticket: data.ticket ? { id: data.ticket.id } : null }
+    : type === 'settings_updated'
+      ? { businessId: data.businessId }
+      : { business_id: data.business_id };
+  await db.prepare('INSERT INTO app_events (type, payload) VALUES (?, ?)').run(type, JSON.stringify(safeData));
+  await db.prepare('DELETE FROM app_events WHERE id < (SELECT COALESCE(MAX(id), 0) - 1000 FROM app_events)').run();
+}
+
+app.get('/api/events', async (req, res) => {
+  try {
+    const hasCursor = Object.hasOwn(req.query, 'since');
+    const cursor = Number.parseInt(req.query.since, 10);
+    const latest = await db.prepare('SELECT COALESCE(MAX(id), 0) as id FROM app_events').get();
+    const events = hasCursor && Number.isSafeInteger(cursor) && cursor >= 0
+      ? await db.prepare('SELECT id, type, payload FROM app_events WHERE id > ? ORDER BY id ASC LIMIT 100').all(cursor)
+      : [];
+    res.json({ events, cursor: events.at(-1)?.id ?? latest.id });
+  } catch (err) {
+    console.error('Error fetching application events:', err);
+    res.status(500).json({ error: 'Error al consultar actualizaciones' });
+  }
 });
 
 // ----------------------------------------------------
 // AUTHENTICATION
 // ----------------------------------------------------
-app.post('/api/auth/login', (req, res) => {
+app.post('/api/auth/login', async (req, res) => {
   try {
     const { email, password } = req.body;
-    if (!email || !password) {
+    if (typeof email !== 'string' || typeof password !== 'string' || !email || !password) {
       return res.status(400).json({ error: 'Email y contraseña requeridos' });
     }
 
-    const user = db.prepare('SELECT id, name, email, phone, role, business_id, password FROM users WHERE LOWER(email) = LOWER(?)').get(email);
-    if (!user || user.password !== password) {
+    const user = await db.prepare('SELECT id, name, email, phone, role, business_id, password FROM users WHERE LOWER(email) = LOWER(?)').get(email);
+    if (!user || !verifyPassword(password, user.password)) {
       return res.status(401).json({ error: 'Credenciales inválidas. Verifica tu email y contraseña.' });
+    }
+
+    if (!user.password.startsWith('scrypt$')) {
+      await db.prepare('UPDATE users SET password = ? WHERE id = ?').run(hashPassword(password), user.id);
     }
 
     let business = null;
     if (user.business_id) {
-      business = db.prepare('SELECT * FROM businesses WHERE id = ?').get(user.business_id);
+      business = await db.prepare('SELECT * FROM businesses WHERE id = ?').get(user.business_id);
     }
 
     const safeUser = {
@@ -77,6 +146,7 @@ app.post('/api/auth/login', (req, res) => {
       business
     };
 
+    setSessionCookie(res, user);
     res.json({ user: safeUser });
   } catch (err) {
     console.error('Login error:', err);
@@ -84,25 +154,29 @@ app.post('/api/auth/login', (req, res) => {
   }
 });
 
-app.post('/api/auth/register', (req, res) => {
+app.post('/api/auth/register', async (req, res) => {
   try {
-    const { name, email, phone, password, role = 'cliente', business_id = null } = req.body;
-    if (!name || !email || !password) {
+    const { name, email, phone, password } = req.body;
+    if (typeof name !== 'string' || typeof email !== 'string' || typeof password !== 'string' || !name.trim() || !email.trim() || !password) {
       return res.status(400).json({ error: 'Nombre, email y contraseña son obligatorios' });
     }
+    if (password.length < 8) {
+      return res.status(400).json({ error: 'La contraseña debe tener al menos 8 caracteres' });
+    }
 
-    const existing = db.prepare('SELECT id FROM users WHERE LOWER(email) = LOWER(?)').get(email);
+    const existing = await db.prepare('SELECT id FROM users WHERE LOWER(email) = LOWER(?)').get(email);
     if (existing) {
       return res.status(400).json({ error: 'Ya existe un usuario registrado con este correo' });
     }
 
-    const userId = 'usr_' + Date.now();
-    db.prepare(`
+    const userId = 'usr_' + randomUUID();
+    await db.prepare(`
       INSERT INTO users (id, name, email, phone, role, business_id, password)
       VALUES (?, ?, ?, ?, ?, ?, ?)
-    `).run(userId, name, email, phone || '', role, business_id, password);
+    `).run(userId, name, email, phone || '', 'cliente', null, hashPassword(password));
 
-    const newUser = { id: userId, name, email, phone, role, business_id };
+    const newUser = { id: userId, name, email, phone, role: 'cliente', business_id: null };
+    setSessionCookie(res, newUser);
     res.status(201).json({ user: newUser });
   } catch (err) {
     console.error('Register error:', err);
@@ -110,12 +184,18 @@ app.post('/api/auth/register', (req, res) => {
   }
 });
 
+app.post('/api/auth/logout', (req, res) => {
+  const secure = process.env.VERCEL ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `turnofacil_session=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0${secure}`);
+  res.json({ success: true });
+});
+
 // ----------------------------------------------------
 // BUSINESSES & SETTINGS
 // ----------------------------------------------------
-app.get('/api/businesses', (req, res) => {
+app.get('/api/businesses', async (req, res) => {
   try {
-    const businesses = db.prepare('SELECT * FROM businesses ORDER BY name ASC').all();
+    const businesses = await db.prepare('SELECT * FROM businesses ORDER BY name ASC').all();
     const parsed = businesses.map(b => ({
       ...b,
       working_days: typeof b.working_days === 'string' ? JSON.parse(b.working_days) : b.working_days
@@ -127,16 +207,16 @@ app.get('/api/businesses', (req, res) => {
   }
 });
 
-app.get('/api/businesses/:id', (req, res) => {
+app.get('/api/businesses/:id', async (req, res) => {
   try {
-    const business = db.prepare('SELECT * FROM businesses WHERE id = ?').get(req.params.id);
+    const business = await db.prepare('SELECT * FROM businesses WHERE id = ?').get(req.params.id);
     if (!business) {
       return res.status(404).json({ error: 'Establecimiento no encontrado' });
     }
 
     business.working_days = typeof business.working_days === 'string' ? JSON.parse(business.working_days) : business.working_days;
 
-    const services = db.prepare('SELECT * FROM services WHERE business_id = ? AND active = 1 ORDER BY name ASC').all(req.params.id);
+    const services = await db.prepare('SELECT * FROM services WHERE business_id = ? AND active = 1 ORDER BY name ASC').all(req.params.id);
     res.json({ ...business, services });
   } catch (err) {
     console.error('Error fetching business:', err);
@@ -144,11 +224,11 @@ app.get('/api/businesses/:id', (req, res) => {
   }
 });
 
-app.put('/api/businesses/:id/settings', (req, res) => {
+app.put('/api/businesses/:id/settings', requireBusinessAdmin, async (req, res) => {
   try {
     const { name, slogan, address, phone, open_time, close_time, working_days, slot_duration_default } = req.body;
     
-    db.prepare(`
+    await db.prepare(`
       UPDATE businesses
       SET name = COALESCE(?, name),
           slogan = COALESCE(?, slogan),
@@ -171,10 +251,10 @@ app.put('/api/businesses/:id/settings', (req, res) => {
       req.params.id
     );
 
-    const updated = db.prepare('SELECT * FROM businesses WHERE id = ?').get(req.params.id);
+    const updated = await db.prepare('SELECT * FROM businesses WHERE id = ?').get(req.params.id);
     updated.working_days = JSON.parse(updated.working_days);
     
-    broadcastEvent('settings_updated', { businessId: req.params.id });
+    await broadcastEvent('settings_updated', { businessId: req.params.id });
     res.json(updated);
   } catch (err) {
     console.error('Error updating business settings:', err);
@@ -187,7 +267,7 @@ app.put('/api/businesses/:id/settings', (req, res) => {
 // ----------------------------------------------------
 app.get('/api/businesses/:id/qr', async (req, res) => {
   try {
-    const business = db.prepare('SELECT * FROM businesses WHERE id = ?').get(req.params.id);
+    const business = await db.prepare('SELECT * FROM businesses WHERE id = ?').get(req.params.id);
     if (!business) return res.status(404).json({ error: 'Negocio no encontrado' });
 
     // Host URL or frontend direct link to turn registration
@@ -220,29 +300,29 @@ app.get('/api/businesses/:id/qr', async (req, res) => {
 // ----------------------------------------------------
 // SERVICES CRUD
 // ----------------------------------------------------
-app.get('/api/businesses/:id/services', (req, res) => {
+app.get('/api/businesses/:id/services', async (req, res) => {
   try {
-    const services = db.prepare('SELECT * FROM services WHERE business_id = ? ORDER BY active DESC, name ASC').all(req.params.id);
+    const services = await db.prepare('SELECT * FROM services WHERE business_id = ? ORDER BY active DESC, name ASC').all(req.params.id);
     res.json(services);
   } catch (err) {
     res.status(500).json({ error: 'Error al consultar servicios' });
   }
 });
 
-app.post('/api/businesses/:id/services', (req, res) => {
+app.post('/api/businesses/:id/services', requireBusinessAdmin, async (req, res) => {
   try {
     const { name, category, duration, price, description } = req.body;
     if (!name || !duration || price === undefined) {
       return res.status(400).json({ error: 'Nombre, duración y precio son requeridos' });
     }
 
-    const id = 'srv_' + Date.now();
-    db.prepare(`
+    const id = 'srv_' + randomUUID();
+    await db.prepare(`
       INSERT INTO services (id, business_id, name, category, duration, price, description, active)
       VALUES (?, ?, ?, ?, ?, ?, ?, 1)
     `).run(id, req.params.id, name, category || 'General', parseInt(duration), parseFloat(price), description || '');
 
-    const created = db.prepare('SELECT * FROM services WHERE id = ?').get(id);
+    const created = await db.prepare('SELECT * FROM services WHERE id = ?').get(id);
     res.status(201).json(created);
   } catch (err) {
     console.error('Error creating service:', err);
@@ -250,10 +330,10 @@ app.post('/api/businesses/:id/services', (req, res) => {
   }
 });
 
-app.put('/api/services/:id', (req, res) => {
+app.put('/api/services/:id', requireServiceBusinessAdmin, async (req, res) => {
   try {
     const { name, category, duration, price, description, active } = req.body;
-    db.prepare(`
+    await db.prepare(`
       UPDATE services
       SET name = COALESCE(?, name),
           category = COALESCE(?, category),
@@ -264,16 +344,16 @@ app.put('/api/services/:id', (req, res) => {
       WHERE id = ?
     `).run(name, category, duration, price, description, active, req.params.id);
 
-    const updated = db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
+    const updated = await db.prepare('SELECT * FROM services WHERE id = ?').get(req.params.id);
     res.json(updated);
   } catch (err) {
     res.status(500).json({ error: 'Error al actualizar servicio' });
   }
 });
 
-app.delete('/api/services/:id', (req, res) => {
+app.delete('/api/services/:id', requireServiceBusinessAdmin, async (req, res) => {
   try {
-    db.prepare('DELETE FROM services WHERE id = ?').run(req.params.id);
+    await db.prepare('DELETE FROM services WHERE id = ?').run(req.params.id);
     res.json({ success: true, message: 'Servicio eliminado correctamente' });
   } catch (err) {
     res.status(500).json({ error: 'Error al eliminar servicio' });
@@ -284,14 +364,14 @@ app.delete('/api/services/:id', (req, res) => {
 // AVAILABLE TIME SLOTS GENERATOR (Requirements 47, 49, 50)
 // Prevents overlap and strictly follows business open/close hours and working days
 // ----------------------------------------------------
-app.get('/api/businesses/:id/available-slots', (req, res) => {
+app.get('/api/businesses/:id/available-slots', async (req, res) => {
   try {
     const { date, serviceId } = req.query;
     if (!date) {
       return res.status(400).json({ error: 'La fecha es obligatoria (YYYY-MM-DD)' });
     }
 
-    const business = db.prepare('SELECT * FROM businesses WHERE id = ?').get(req.params.id);
+    const business = await db.prepare('SELECT * FROM businesses WHERE id = ?').get(req.params.id);
     if (!business) return res.status(404).json({ error: 'Negocio no encontrado' });
 
     const workingDays = JSON.parse(business.working_days);
@@ -313,7 +393,7 @@ app.get('/api/businesses/:id/available-slots', (req, res) => {
     // Get service duration
     let duration = business.slot_duration_default || 30;
     if (serviceId) {
-      const srv = db.prepare('SELECT duration FROM services WHERE id = ?').get(serviceId);
+      const srv = await db.prepare('SELECT duration FROM services WHERE id = ?').get(serviceId);
       if (srv && srv.duration) duration = srv.duration;
     }
 
@@ -324,7 +404,7 @@ app.get('/api/businesses/:id/available-slots', (req, res) => {
     const closeTotalMin = closeH * 60 + closeM;
 
     // Get existing booked tickets for that date
-    const bookedTickets = db.prepare(`
+    const bookedTickets = await db.prepare(`
       SELECT time_slot, estimated_duration, status
       FROM tickets
       WHERE business_id = ? AND date = ? AND status NOT IN ('cancelado')
@@ -401,12 +481,12 @@ app.get('/api/businesses/:id/available-slots', (req, res) => {
 // ----------------------------------------------------
 
 // Get live queue for a business (for customer tracking, employee dashboard, or public waiting room TV)
-app.get('/api/businesses/:id/queue', (req, res) => {
+app.get('/api/businesses/:id/queue', requireRoles('admin', 'empleado', 'superadmin'), requireBusinessAccess, async (req, res) => {
   try {
     const today = new Date().toISOString().split('T')[0];
     
     // Active ticket being attended right now
-    const currentlyAttending = db.prepare(`
+    const currentlyAttending = await db.prepare(`
       SELECT t.*, s.name as service_name, s.category as service_category, u.name as employee_name
       FROM tickets t
       LEFT JOIN services s ON t.service_id = s.id
@@ -417,7 +497,7 @@ app.get('/api/businesses/:id/queue', (req, res) => {
     `).get(req.params.id, today);
 
     // Waiting queue
-    const waitingList = db.prepare(`
+    const waitingList = await db.prepare(`
       SELECT t.*, s.name as service_name, s.category as service_category, s.duration
       FROM tickets t
       LEFT JOIN services s ON t.service_id = s.id
@@ -426,7 +506,7 @@ app.get('/api/businesses/:id/queue', (req, res) => {
     `).all(req.params.id, today);
 
     // Recently attended today
-    const recentlyAttended = db.prepare(`
+    const recentlyAttended = await db.prepare(`
       SELECT t.*, s.name as service_name
       FROM tickets t
       LEFT JOIN services s ON t.service_id = s.id
@@ -437,10 +517,10 @@ app.get('/api/businesses/:id/queue', (req, res) => {
 
     // Summary counters
     const stats = {
-      total_today: db.prepare('SELECT COUNT(*) as count FROM tickets WHERE business_id = ? AND date = ?').get(req.params.id, today).count,
+      total_today: (await db.prepare('SELECT COUNT(*) as count FROM tickets WHERE business_id = ? AND date = ?').get(req.params.id, today)).count,
       waiting_count: waitingList.length,
       attending_count: currentlyAttending ? 1 : 0,
-      completed_count: db.prepare("SELECT COUNT(*) as count FROM tickets WHERE business_id = ? AND date = ? AND status = 'atendido'").get(req.params.id, today).count,
+      completed_count: (await db.prepare("SELECT COUNT(*) as count FROM tickets WHERE business_id = ? AND date = ? AND status = 'atendido'").get(req.params.id, today)).count,
     };
 
     res.json({
@@ -456,7 +536,7 @@ app.get('/api/businesses/:id/queue', (req, res) => {
 });
 
 // Create new ticket / reservation
-app.post('/api/tickets', (req, res) => {
+app.post('/api/tickets', async (req, res) => {
   try {
     const {
       business_id,
@@ -464,7 +544,6 @@ app.post('/api/tickets', (req, res) => {
       client_name,
       client_phone,
       client_email,
-      user_id = null,
       party_size = 1,
       notes = '',
       date,
@@ -475,14 +554,14 @@ app.post('/api/tickets', (req, res) => {
       return res.status(400).json({ error: 'Datos incompletos para solicitar el turno' });
     }
 
-    const business = db.prepare('SELECT * FROM businesses WHERE id = ?').get(business_id);
+    const business = await db.prepare('SELECT * FROM businesses WHERE id = ?').get(business_id);
     if (!business) return res.status(404).json({ error: 'Negocio no válido' });
 
-    const service = db.prepare('SELECT * FROM services WHERE id = ?').get(service_id);
+    const service = await db.prepare('SELECT * FROM services WHERE id = ?').get(service_id);
     if (!service) return res.status(404).json({ error: 'Servicio no válido' });
 
     // Verify slot is not already taken by an active ticket
-    const conflict = db.prepare(`
+    const conflict = await db.prepare(`
       SELECT id FROM tickets
       WHERE business_id = ? AND date = ? AND time_slot = ? AND status NOT IN ('cancelado')
     `).get(business_id, date, time_slot);
@@ -491,13 +570,15 @@ app.post('/api/tickets', (req, res) => {
       return res.status(409).json({ error: 'El horario seleccionado ya fue reservado por otro cliente. Por favor elige otro intervalo disponible.' });
     }
 
-    // Generate sequential ticket code for today:
-    // Barbería -> TF-B01, TF-B02... Restaurante -> TF-R01, TF-R02...
-    const countToday = db.prepare('SELECT COUNT(*) as count FROM tickets WHERE business_id = ? AND date = ?').get(business_id, date).count;
+    // Use sequential codes locally; public deployments use unguessable codes for ticket privacy.
+    const countToday = (await db.prepare('SELECT COUNT(*) as count FROM tickets WHERE business_id = ? AND date = ?').get(business_id, date)).count;
     const seq = countToday + 1;
     const prefix = business.type === 'barberia' ? 'TF-B' : 'TF-R';
-    const ticketCode = `${prefix}${seq.toString().padStart(2, '0')}`;
-    const ticketId = 'tkt_' + Date.now();
+    const ticketCode = process.env.SUPABASE_DB_URL
+      ? `${prefix}-${randomUUID().replaceAll('-', '').slice(0, 16).toUpperCase()}`
+      : `${prefix}${seq.toString().padStart(2, '0')}`;
+    const ticketId = randomUUID();
+    const user_id = req.user?.role === 'cliente' ? req.user.sub : null;
 
     const insert = db.prepare(`
       INSERT INTO tickets (
@@ -507,7 +588,7 @@ app.post('/api/tickets', (req, res) => {
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'espera')
     `);
 
-    insert.run(
+    await insert.run(
       ticketId,
       ticketCode,
       seq,
@@ -525,18 +606,18 @@ app.post('/api/tickets', (req, res) => {
     );
 
     // Insert history record
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO ticket_history (id, ticket_id, status, changed_by, note)
       VALUES (?, ?, 'espera', ?, 'Turno solicitado')
-    `).run('hist_' + Date.now(), ticketId, client_name);
+    `).run('hist_' + randomUUID(), ticketId, client_name);
 
     // Calculate queue position: how many people ahead
-    const ahead = db.prepare(`
+    const ahead = (await db.prepare(`
       SELECT COUNT(*) as count FROM tickets
       WHERE business_id = ? AND date = ? AND status = 'espera' AND id != ? AND (time_slot < ? OR (time_slot = ? AND ticket_seq < ?))
-    `).get(business_id, date, ticketId, time_slot, time_slot, seq).count;
+    `).get(business_id, date, ticketId, time_slot, time_slot, seq)).count;
 
-    const fullTicket = db.prepare(`
+    const fullTicket = await db.prepare(`
       SELECT t.*, s.name as service_name, s.price as service_price, b.name as business_name, b.address as business_address
       FROM tickets t
       LEFT JOIN services s ON t.service_id = s.id
@@ -545,7 +626,7 @@ app.post('/api/tickets', (req, res) => {
     `).get(ticketId);
 
     // Notify clients in real-time
-    broadcastEvent('new_ticket', { business_id, ticket: fullTicket });
+    await broadcastEvent('new_ticket', { business_id, ticket: fullTicket });
 
     res.status(201).json({
       ...fullTicket,
@@ -559,10 +640,10 @@ app.post('/api/tickets', (req, res) => {
 });
 
 // Track ticket by code or ID
-app.get('/api/tickets/track/:code', (req, res) => {
+app.get('/api/tickets/track/:code', async (req, res) => {
   try {
     const code = req.params.code.trim();
-    const ticket = db.prepare(`
+    const ticket = await db.prepare(`
       SELECT t.*, s.name as service_name, s.price as service_price, s.duration,
              b.name as business_name, b.type as business_type, b.address as business_address, b.phone as business_phone,
              u.name as employee_name
@@ -582,15 +663,16 @@ app.get('/api/tickets/track/:code', (req, res) => {
     // Compute people ahead if status is 'espera'
     let peopleAhead = 0;
     if (ticket.status === 'espera') {
-      peopleAhead = db.prepare(`
+      peopleAhead = (await db.prepare(`
         SELECT COUNT(*) as count FROM tickets
         WHERE business_id = ? AND date = ? AND status = 'espera' AND id != ?
           AND (time_slot < ? OR (time_slot = ? AND ticket_seq < ?))
-      `).get(ticket.business_id, ticket.date, ticket.id, ticket.time_slot, ticket.time_slot, ticket.ticket_seq).count;
+      `).get(ticket.business_id, ticket.date, ticket.id, ticket.time_slot, ticket.time_slot, ticket.ticket_seq)).count;
     }
 
+    const { client_phone, client_email, ...publicTicket } = ticket;
     res.json({
-      ...ticket,
+      ...publicTicket,
       people_ahead: peopleAhead,
       estimated_wait_minutes: peopleAhead * (ticket.duration || 30)
     });
@@ -601,7 +683,7 @@ app.get('/api/tickets/track/:code', (req, res) => {
 });
 
 // Update ticket status (Called / Next / Attending / Completed / Cancelled)
-app.put('/api/tickets/:id/status', (req, res) => {
+app.put('/api/tickets/:id/status', requireRoles('admin', 'empleado', 'superadmin'), requireTicketBusinessAccess, async (req, res) => {
   try {
     const { status, employee_id = null, employee_name = 'Personal' } = req.body;
     const validStatuses = ['espera', 'atendiendo', 'atendido', 'cancelado', 'aplazado'];
@@ -610,7 +692,7 @@ app.put('/api/tickets/:id/status', (req, res) => {
       return res.status(400).json({ error: 'Estado de turno no válido' });
     }
 
-    const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
+    const ticket = await db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
     if (!ticket) return res.status(404).json({ error: 'Turno no encontrado' });
 
     const nowTime = new Date().toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit', hour12: false });
@@ -629,15 +711,15 @@ app.put('/api/tickets/:id/status', (req, res) => {
     updateQuery += ' WHERE id = ?';
     params.push(req.params.id);
 
-    db.prepare(updateQuery).run(...params);
+    await db.prepare(updateQuery).run(...params);
 
     // Record in history
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO ticket_history (id, ticket_id, status, changed_by, note)
       VALUES (?, ?, ?, ?, ?)
-    `).run('hist_' + Date.now(), req.params.id, status, employee_name, `Estado cambiado a ${status}`);
+    `).run('hist_' + randomUUID(), req.params.id, status, employee_name, `Estado cambiado a ${status}`);
 
-    const updated = db.prepare(`
+    const updated = await db.prepare(`
       SELECT t.*, s.name as service_name, b.name as business_name
       FROM tickets t
       LEFT JOIN services s ON t.service_id = s.id
@@ -645,7 +727,7 @@ app.put('/api/tickets/:id/status', (req, res) => {
       WHERE t.id = ?
     `).get(req.params.id);
 
-    broadcastEvent('ticket_status_changed', {
+    await broadcastEvent('ticket_status_changed', {
       business_id: ticket.business_id,
       ticket: updated,
       new_status: status
@@ -659,10 +741,10 @@ app.put('/api/tickets/:id/status', (req, res) => {
 });
 
 // Postpone turn (Aplazar turno - Image 2 use case)
-app.put('/api/tickets/:id/aplazado', (req, res) => {
+app.put('/api/tickets/:id/aplazado', async (req, res) => {
   try {
     const { new_time_slot, new_date } = req.body;
-    const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
+    const ticket = await db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
     if (!ticket) return res.status(404).json({ error: 'Turno no encontrado' });
 
     if (ticket.status !== 'espera') {
@@ -679,19 +761,19 @@ app.put('/api/tickets/:id/aplazado', (req, res) => {
       targetTime = `${Math.floor(total / 60).toString().padStart(2, '0')}:${(total % 60).toString().padStart(2, '0')}`;
     }
 
-    db.prepare(`
+    await db.prepare(`
       UPDATE tickets
       SET status = 'espera', time_slot = ?, date = ?, notes = notes || ' [Turno aplazado]'
       WHERE id = ?
     `).run(targetTime, targetDate, req.params.id);
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO ticket_history (id, ticket_id, status, changed_by, note)
       VALUES (?, ?, 'aplazado', 'Cliente', ?)
-    `).run('hist_' + Date.now(), req.params.id, `Turno aplazado para las ${targetTime}`);
+    `).run('hist_' + randomUUID(), req.params.id, `Turno aplazado para las ${targetTime}`);
 
-    const updated = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
-    broadcastEvent('ticket_status_changed', {
+    const updated = await db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
+    await broadcastEvent('ticket_status_changed', {
       business_id: ticket.business_id,
       ticket: updated,
       new_status: 'aplazado'
@@ -705,19 +787,19 @@ app.put('/api/tickets/:id/aplazado', (req, res) => {
 });
 
 // Cancel turn (Cancelar turno - Image 2 use case)
-app.put('/api/tickets/:id/cancel', (req, res) => {
+app.put('/api/tickets/:id/cancel', async (req, res) => {
   try {
-    const ticket = db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
+    const ticket = await db.prepare('SELECT * FROM tickets WHERE id = ?').get(req.params.id);
     if (!ticket) return res.status(404).json({ error: 'Turno no encontrado' });
 
-    db.prepare("UPDATE tickets SET status = 'cancelado' WHERE id = ?").run(req.params.id);
+    await db.prepare("UPDATE tickets SET status = 'cancelado' WHERE id = ?").run(req.params.id);
 
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO ticket_history (id, ticket_id, status, changed_by, note)
       VALUES (?, ?, 'cancelado', 'Cliente', 'Turno cancelado por el usuario')
-    `).run('hist_' + Date.now(), req.params.id);
+    `).run('hist_' + randomUUID(), req.params.id);
 
-    broadcastEvent('ticket_status_changed', {
+    await broadcastEvent('ticket_status_changed', {
       business_id: ticket.business_id,
       ticketId: req.params.id,
       new_status: 'cancelado'
@@ -732,7 +814,7 @@ app.put('/api/tickets/:id/cancel', (req, res) => {
 // ----------------------------------------------------
 // ADMIN CALENDAR (Requirement 48: "calendario centralizado con los turnos agendados por día y por semana")
 // ----------------------------------------------------
-app.get('/api/businesses/:id/calendar', (req, res) => {
+app.get('/api/businesses/:id/calendar', requireBusinessAccess, async (req, res) => {
   try {
     const { start, end } = req.query;
     let query = `
@@ -754,7 +836,7 @@ app.get('/api/businesses/:id/calendar', (req, res) => {
     }
 
     query += ' ORDER BY t.date ASC, t.time_slot ASC';
-    const tickets = db.prepare(query).all(...params);
+    const tickets = await db.prepare(query).all(...params);
 
     res.json(tickets);
   } catch (err) {
@@ -766,7 +848,7 @@ app.get('/api/businesses/:id/calendar', (req, res) => {
 // ----------------------------------------------------
 // ATTENTION HISTORY & AUDIT (Requirement 53: "consultar el historial de atención de los turnos gestionados")
 // ----------------------------------------------------
-app.get('/api/businesses/:id/history', (req, res) => {
+app.get('/api/businesses/:id/history', requireBusinessAdmin, async (req, res) => {
   try {
     const { status, dateFrom, dateTo, search } = req.query;
     let query = `
@@ -796,7 +878,7 @@ app.get('/api/businesses/:id/history', (req, res) => {
     }
 
     query += ' ORDER BY t.date DESC, t.time_slot DESC';
-    const list = db.prepare(query).all(...params);
+    const list = await db.prepare(query).all(...params);
 
     // Compute metrics
     const totalAttended = list.filter(t => t.status === 'atendido').length;
@@ -822,39 +904,39 @@ app.get('/api/businesses/:id/history', (req, res) => {
 // ----------------------------------------------------
 // INVENTORY & CATALOG (Image 3: "Catalogo", "Gestionar inventario")
 // ----------------------------------------------------
-app.get('/api/businesses/:id/inventory', (req, res) => {
+app.get('/api/businesses/:id/inventory', requireBusinessAccess, async (req, res) => {
   try {
-    const items = db.prepare('SELECT * FROM inventory WHERE business_id = ? ORDER BY category ASC, name ASC').all(req.params.id);
+    const items = await db.prepare('SELECT * FROM inventory WHERE business_id = ? ORDER BY category ASC, name ASC').all(req.params.id);
     res.json(items);
   } catch (err) {
     res.status(500).json({ error: 'Error al obtener inventario' });
   }
 });
 
-app.post('/api/businesses/:id/inventory', (req, res) => {
+app.post('/api/businesses/:id/inventory', requireBusinessAccess, async (req, res) => {
   try {
     const { name, category, price, stock, unit = 'unidad', min_stock = 5 } = req.body;
     if (!name || stock === undefined || price === undefined) {
       return res.status(400).json({ error: 'Nombre, precio y stock son obligatorios' });
     }
 
-    const id = 'inv_' + Date.now();
-    db.prepare(`
+    const id = 'inv_' + randomUUID();
+    await db.prepare(`
       INSERT INTO inventory (id, business_id, name, category, price, stock, unit, min_stock)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
     `).run(id, req.params.id, name, category || 'General', parseFloat(price), parseInt(stock), unit, parseInt(min_stock));
 
-    const item = db.prepare('SELECT * FROM inventory WHERE id = ?').get(id);
+    const item = await db.prepare('SELECT * FROM inventory WHERE id = ?').get(id);
     res.status(201).json(item);
   } catch (err) {
     res.status(500).json({ error: 'Error al registrar artículo en inventario' });
   }
 });
 
-app.put('/api/inventory/:id', (req, res) => {
+app.put('/api/inventory/:id', requireInventoryBusinessAccess, async (req, res) => {
   try {
     const { name, category, price, stock, unit, min_stock } = req.body;
-    db.prepare(`
+    await db.prepare(`
       UPDATE inventory
       SET name = COALESCE(?, name),
           category = COALESCE(?, category),
@@ -865,7 +947,7 @@ app.put('/api/inventory/:id', (req, res) => {
       WHERE id = ?
     `).run(name, category, price, stock, unit, min_stock, req.params.id);
 
-    const updated = db.prepare('SELECT * FROM inventory WHERE id = ?').get(req.params.id);
+    const updated = await db.prepare('SELECT * FROM inventory WHERE id = ?').get(req.params.id);
     res.json(updated);
   } catch (err) {
     res.status(500).json({ error: 'Error al actualizar artículo' });
@@ -875,9 +957,9 @@ app.put('/api/inventory/:id', (req, res) => {
 // ----------------------------------------------------
 // USERS LIST FOR ADMIN
 // ----------------------------------------------------
-app.get('/api/businesses/:id/staff', (req, res) => {
+app.get('/api/businesses/:id/staff', requireBusinessAdmin, async (req, res) => {
   try {
-    const staff = db.prepare(`
+    const staff = await db.prepare(`
       SELECT id, name, email, phone, role, business_id, created_at
       FROM users
       WHERE business_id = ? OR role = 'admin'
@@ -892,7 +974,7 @@ app.get('/api/businesses/:id/staff', (req, res) => {
 // ----------------------------------------------------
 // MARKETPLACE (Rappi-style discovery without login)
 // ----------------------------------------------------
-app.get('/api/marketplace', (req, res) => {
+app.get('/api/marketplace', async (req, res) => {
   try {
     const { category, type, search } = req.query;
     let query = 'SELECT * FROM businesses WHERE status = ?';
@@ -912,21 +994,21 @@ app.get('/api/marketplace', (req, res) => {
     }
 
     query += ' ORDER BY rating DESC, review_count DESC';
-    const businesses = db.prepare(query).all(...params);
+    const businesses = await db.prepare(query).all(...params);
 
-    const fullBusinesses = businesses.map(b => {
-      const services = db.prepare('SELECT * FROM services WHERE business_id = ? AND active = 1 ORDER BY price ASC').all(b.id);
-      const items = db.prepare('SELECT * FROM inventory WHERE business_id = ? ORDER BY popular DESC, price ASC LIMIT 6').all(b.id);
+    const fullBusinesses = await Promise.all(businesses.map(async b => {
+      const services = await db.prepare('SELECT * FROM services WHERE business_id = ? AND active = 1 ORDER BY price ASC').all(b.id);
+      const items = await db.prepare('SELECT * FROM inventory WHERE business_id = ? ORDER BY popular DESC, price ASC LIMIT 6').all(b.id);
       return {
         ...b,
         working_days: typeof b.working_days === 'string' ? JSON.parse(b.working_days) : b.working_days,
         services,
         items
       };
-    });
+    }));
 
     // Popular food dishes / services across Mocoa
-    const popularDishes = db.prepare(`
+    const popularDishes = await db.prepare(`
       SELECT i.*, b.name as business_name, b.type as business_type, b.rating as business_rating
       FROM inventory i
       JOIN businesses b ON i.business_id = b.id
@@ -956,29 +1038,29 @@ app.get('/api/marketplace', (req, res) => {
 // ----------------------------------------------------
 // SUPER ADMIN DASHBOARD & PLATFORM MANAGEMENT
 // ----------------------------------------------------
-app.get('/api/superadmin/dashboard', (req, res) => {
+app.get('/api/superadmin/dashboard', requireRoles('superadmin'), async (req, res) => {
   try {
-    const totalBusinesses = db.prepare('SELECT COUNT(*) as count FROM businesses').get().count;
-    const activeBusinesses = db.prepare("SELECT COUNT(*) as count FROM businesses WHERE status = 'activo'").get().count;
-    const totalUsers = db.prepare('SELECT COUNT(*) as count FROM users').get().count;
-    const totalTickets = db.prepare('SELECT COUNT(*) as count FROM tickets').get().count;
-    const completedTickets = db.prepare("SELECT COUNT(*) as count FROM tickets WHERE status = 'atendido'").get().count;
+    const totalBusinesses = (await db.prepare('SELECT COUNT(*) as count FROM businesses').get()).count;
+    const activeBusinesses = (await db.prepare("SELECT COUNT(*) as count FROM businesses WHERE status = 'activo'").get()).count;
+    const totalUsers = (await db.prepare('SELECT COUNT(*) as count FROM users').get()).count;
+    const totalTickets = (await db.prepare('SELECT COUNT(*) as count FROM tickets').get()).count;
+    const completedTickets = (await db.prepare("SELECT COUNT(*) as count FROM tickets WHERE status = 'atendido'").get()).count;
 
     // Platform Financials (Platform earnings, keeping companies' internal ledgers private)
-    const txTotal = db.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM platform_transactions WHERE status = 'completado'").get().total;
-    const subTotal = db.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM platform_transactions WHERE type = 'suscripcion_mensual' AND status = 'completado'").get().total;
-    const commTotal = db.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM platform_transactions WHERE type = 'comision_turno' AND status = 'completado'").get().total;
+    const txTotal = (await db.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM platform_transactions WHERE status = 'completado'").get()).total;
+    const subTotal = (await db.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM platform_transactions WHERE type = 'suscripcion_mensual' AND status = 'completado'").get()).total;
+    const commTotal = (await db.prepare("SELECT COALESCE(SUM(amount), 0) as total FROM platform_transactions WHERE type = 'comision_turno' AND status = 'completado'").get()).total;
 
     // Monthly Recurring Revenue (MRR) from active business subscriptions
-    const projectedMrr = db.prepare("SELECT COALESCE(SUM(monthly_fee), 0) as mrr FROM businesses WHERE status = 'activo'").get().mrr;
+    const projectedMrr = (await db.prepare("SELECT COALESCE(SUM(monthly_fee), 0) as mrr FROM businesses WHERE status = 'activo'").get()).mrr;
 
     // All businesses with summary metrics for superadmin
-    const businesses = db.prepare('SELECT * FROM businesses ORDER BY created_at DESC').all();
-    const enrichedBusinesses = businesses.map(b => {
-      const ticketsCount = db.prepare('SELECT COUNT(*) as count FROM tickets WHERE business_id = ?').get(b.id).count;
-      const staffCount = db.prepare('SELECT COUNT(*) as count FROM users WHERE business_id = ?').get(b.id).count;
+    const businesses = await db.prepare('SELECT * FROM businesses ORDER BY created_at DESC').all();
+    const enrichedBusinesses = await Promise.all(businesses.map(async b => {
+      const ticketsCount = (await db.prepare('SELECT COUNT(*) as count FROM tickets WHERE business_id = ?').get(b.id)).count;
+      const staffCount = (await db.prepare('SELECT COUNT(*) as count FROM users WHERE business_id = ?').get(b.id)).count;
       const today = new Date().toISOString().split('T')[0];
-      const todayTickets = db.prepare('SELECT COUNT(*) as count FROM tickets WHERE business_id = ? AND date = ?').get(b.id, today).count;
+      const todayTickets = (await db.prepare('SELECT COUNT(*) as count FROM tickets WHERE business_id = ? AND date = ?').get(b.id, today)).count;
 
       return {
         ...b,
@@ -989,10 +1071,10 @@ app.get('/api/superadmin/dashboard', (req, res) => {
           staff_count: staffCount
         }
       };
-    });
+    }));
 
     // Recent platform transactions
-    const recentTx = db.prepare('SELECT * FROM platform_transactions ORDER BY date DESC, created_at DESC LIMIT 15').all();
+    const recentTx = await db.prepare('SELECT * FROM platform_transactions ORDER BY date DESC, created_at DESC LIMIT 15').all();
 
     res.json({
       metrics: {
@@ -1016,16 +1098,16 @@ app.get('/api/superadmin/dashboard', (req, res) => {
 });
 
 // Toggle business status by Super Admin
-app.put('/api/superadmin/businesses/:id/status', (req, res) => {
+app.put('/api/superadmin/businesses/:id/status', requireRoles('superadmin'), async (req, res) => {
   try {
     const { status } = req.body;
     if (!['activo', 'pausado'].includes(status)) {
       return res.status(400).json({ error: 'Estado no válido' });
     }
 
-    db.prepare('UPDATE businesses SET status = ? WHERE id = ?').run(status, req.params.id);
-    const updated = db.prepare('SELECT * FROM businesses WHERE id = ?').get(req.params.id);
-    broadcastEvent('settings_updated', { businessId: req.params.id });
+    await db.prepare('UPDATE businesses SET status = ? WHERE id = ?').run(status, req.params.id);
+    const updated = await db.prepare('SELECT * FROM businesses WHERE id = ?').get(req.params.id);
+    await broadcastEvent('settings_updated', { businessId: req.params.id });
     res.json(updated);
   } catch (err) {
     res.status(500).json({ error: 'Error al cambiar estado del negocio' });
@@ -1033,7 +1115,7 @@ app.put('/api/superadmin/businesses/:id/status', (req, res) => {
 });
 
 // Super Admin creates a new business on the platform
-app.post('/api/superadmin/businesses', (req, res) => {
+app.post('/api/superadmin/businesses', requireRoles('superadmin'), async (req, res) => {
   try {
     const {
       name,
@@ -1051,8 +1133,8 @@ app.post('/api/superadmin/businesses', (req, res) => {
       return res.status(400).json({ error: 'Nombre, tipo y dirección son requeridos' });
     }
 
-    const id = 'biz_' + Date.now();
-    db.prepare(`
+    const id = 'biz_' + randomUUID();
+    await db.prepare(`
       INSERT INTO businesses (
         id, name, type, category, slogan, description, address, phone,
         subscription_plan, monthly_fee, status
@@ -1071,13 +1153,13 @@ app.post('/api/superadmin/businesses', (req, res) => {
     );
 
     // Record registration fee transaction for platform revenue
-    db.prepare(`
+    await db.prepare(`
       INSERT INTO platform_transactions (id, business_id, business_name, type, concept, amount, status, date)
       VALUES (?, ?, ?, 'suscripcion_mensual', 'Alta inicial de membresía SaaS', ?, 'completado', ?)
-    `).run('tx_' + Date.now(), id, name, parseFloat(monthly_fee) || 65000, new Date().toISOString().split('T')[0]);
+    `).run('tx_' + randomUUID(), id, name, parseFloat(monthly_fee) || 65000, new Date().toISOString().split('T')[0]);
 
-    const created = db.prepare('SELECT * FROM businesses WHERE id = ?').get(id);
-    broadcastEvent('settings_updated', { businessId: id });
+    const created = await db.prepare('SELECT * FROM businesses WHERE id = ?').get(id);
+    await broadcastEvent('settings_updated', { businessId: id });
     res.status(201).json(created);
   } catch (err) {
     console.error('Error registering business:', err);
@@ -1096,10 +1178,20 @@ app.use((req, res, next) => {
   next();
 });
 
-// Start Server
-app.listen(PORT, () => {
-  console.log(`===============================================`);
-  console.log(`🚀 TurnoFácil API Server running on port ${PORT}`);
-  console.log(`📍 Mocoa, Putumayo - Sistema de Gestión de Turnos`);
-  console.log(`===============================================`);
-});
+if (process.env.VERCEL) {
+  app.use((req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    return res.status(404).end();
+  });
+}
+
+export default app;
+
+if (!process.env.VERCEL) {
+  app.listen(PORT, () => {
+    console.log(`===============================================`);
+    console.log(`TurnoFacil API Server running on port ${PORT}`);
+    console.log(`Mocoa, Putumayo - Sistema de Gestion de Turnos`);
+    console.log(`===============================================`);
+  });
+}

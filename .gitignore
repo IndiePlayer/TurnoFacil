@@ -1,0 +1,11 @@
+node_modules/
+frontend/node_modules/
+frontend/dist/
+.vercel/
+.env
+.env.*
+!.env.example
+backend/turnofacil.db
+backend/turnofacil.db-shm
+backend/turnofacil.db-wal
+*.docx

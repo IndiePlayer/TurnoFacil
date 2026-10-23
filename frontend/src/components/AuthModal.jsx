@@ -172,7 +172,7 @@ export default function AuthModal({ isOpen, onClose, onLoginSuccess }) {
             </button>
           </div>
 
-          {/* Quick Demo Logins */}
+          {import.meta.env.DEV && (
           <div className="mt-6 pt-5 border-t border-slate-100">
             <div className="flex items-center space-x-1.5 text-xs text-slate-500 font-semibold mb-2">
               <Sparkles className="w-3.5 h-3.5 text-amber-500" />
@@ -234,6 +234,7 @@ export default function AuthModal({ isOpen, onClose, onLoginSuccess }) {
               </div>
             </div>
           </div>
+          )}
 
         </div>
 
@@ -241,4 +242,3 @@ export default function AuthModal({ isOpen, onClose, onLoginSuccess }) {
     </div>
   );
 }
-

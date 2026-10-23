@@ -1,0 +1,10 @@
+{
+  "installCommand": "npm ci && npm --prefix frontend ci",
+  "buildCommand": "npm run build",
+  "outputDirectory": "frontend/dist",
+  "functions": {
+    "api/[...path].js": {
+      "maxDuration": 30
+    }
+  }
+}
